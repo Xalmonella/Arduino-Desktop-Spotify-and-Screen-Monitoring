@@ -246,6 +246,11 @@ def get_gemini_key() -> str:
 
 GEMINI_API_KEY = get_gemini_key()
 
+# Ollama Engine Settings
+OLLAMA_HOST = "http://localhost:11434"
+ollama_preferred_model = "llama3.2"
+ai_engine_preference  = "auto" # 'auto', 'gemini', 'ollama'
+
 ai_current_emotion = "HAPPY"
 ai_current_text    = "Halo sayang! Aku Kira, pacar AI kamu! ( > ‿ < ) ♡"
 kira_chat_history  = []  # Conversation memory list
@@ -351,13 +356,95 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
         except Exception:
             continue
 
-    if rate_limited:
-        print("\n ⚠️ [INFO GEMINI API]: Kuota gratis Google terkena Rate Limit (HTTP 429).")
-        print("   Tunggu ~1-2 menit hingga kuota reset, atau ganti API Key di https://aistudio.google.com/.")
-        print("   Memakai jawaban offline sementara...")
-
     emo, ans = get_offline_kira_response(user_prompt)
-    kira_chat_history.append({"user": user_prompt, "kira": f"[{emo}] {ans}"})
+    return emo, ans
+
+def check_ollama_status() -> tuple[bool, list[str]]:
+    """Checks if local Ollama server is running (http://localhost:11434) and lists models."""
+    try:
+        url = f"{OLLAMA_HOST}/api/tags"
+        req = urllib.request.Request(url, method='GET')
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            models = [m['name'] for m in data.get('models', [])]
+            return True, models
+    except Exception:
+        return False, []
+
+def query_ollama_ai(user_prompt: str, context_info: str = "", model_name: str = "") -> tuple[str, str]:
+    """Queries local Ollama instance (http://localhost:11434) with conversation memory."""
+    global kira_chat_history, ollama_preferred_model
+    target_model = model_name if model_name else ollama_preferred_model
+
+    messages = [{"role": "system", "content": KIRA_SYSTEM_PROMPT}]
+    for h in kira_chat_history[-6:]:
+        messages.append({"role": "user", "content": h["user"]})
+        messages.append({"role": "assistant", "content": h["kira"]})
+
+    user_content = f"Context: {context_info}\nUser prompt: {user_prompt}" if context_info else user_prompt
+    messages.append({"role": "user", "content": user_content})
+
+    payload = {
+        "model": target_model,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": 0.8,
+            "num_predict": 120
+        }
+    }
+    req_bytes = json.dumps(payload).encode('utf-8')
+
+    url = f"{OLLAMA_HOST}/api/chat"
+    headers = {"Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        res_json = json.loads(resp.read().decode('utf-8'))
+        raw_text = res_json.get("message", {}).get("content", "").strip()
+
+        emotion = "HAPPY"
+        if raw_text.startswith("[") and "]" in raw_text:
+            tag = raw_text[1:raw_text.find("]")].upper()
+            if tag in ("HAPPY", "TALK", "BLUSH", "WINK", "SURPRISED"):
+                emotion = tag
+            raw_text = raw_text[raw_text.find("]") + 1:].strip()
+
+        clean_res = clean_text_for_oled(raw_text)
+        kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
+        return emotion, clean_res[:180]
+
+def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
+    """Unified AI Router: Tries Gemini Cloud API -> Ollama Local AI -> Offline fallback."""
+    global ai_engine_preference, kira_chat_history
+
+    # 1. Manual Ollama preference
+    if ai_engine_preference == "ollama":
+        try:
+            return query_ollama_ai(user_prompt, context_info)
+        except Exception as e:
+            print(f"\n [⚠️ Ollama Local Error]: {e}")
+
+    # 2. Gemini Cloud API
+    key = get_gemini_key()
+    if key and key.strip() not in ("", "YOUR_GEMINI_API_KEY_HERE"):
+        try:
+            emo, ans = query_gemini_ai(user_prompt, context_info)
+            if ans:
+                return emo, ans
+        except Exception:
+            pass
+
+    # 3. Fallback to local Ollama if Gemini key missing or failed
+    ollama_ok, models = check_ollama_status()
+    if ollama_ok and models:
+        try:
+            return query_ollama_ai(user_prompt, context_info)
+        except Exception as e:
+            print(f"\n [⚠️ Ollama Fallback Error]: {e}")
+
+    # 4. Final offline fallback
+    emo, ans = get_offline_kira_response(user_prompt)
+    kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion if 'emotion' in locals() else 'HAPPY'}] {ans}"})
     return emo, ans
 
 # =============================================================================
@@ -771,15 +858,23 @@ async def main():
                     print(" 💬 CHAT SESSION WITH KIRA AI (Kira Desk Companion)")
                     print(" (Ketik 'exit' atau tekan Enter kosong untuk selesai)")
                     print(" (Ketik 'clear' untuk hapus riwayat chat)")
-                    print(" (Ketik 'key <API_KEY>' untuk simpan API Key)")
-                    print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen langsung)")
+                    print(" (Ketik 'key <API_KEY>' untuk simpan Gemini API Key)")
+                    print(" (Ketik 'ollama [model]' untuk pakai Ollama Lokal)")
+                    print(" (Ketik 'gemini' untuk pakai Gemini Cloud API)")
+                    print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen)")
                     print("==================================================")
                     
                     current_key = get_gemini_key()
-                    if current_key:
-                        print(f" [✓] Gemini API Key Aktif: {current_key[:10]}...")
+                    ollama_active, o_models = check_ollama_status()
+
+                    if ai_engine_preference == "ollama":
+                        print(f" [✓] Mode AI: OLLAMA LOKAL ({ollama_preferred_model})")
+                    elif current_key:
+                        print(f" [✓] Mode AI: GEMINI CLOUD API ({current_key[:10]}...)")
+                    elif ollama_active:
+                        print(f" [✓] Mode AI: OLLAMA LOKAL (Terdeteksi model: {', '.join(o_models[:3])})")
                     else:
-                        print(" 💡 INFO: Ketik 'key AIzaSy...' atau buat file 'gemini_key.txt' untuk API Key.")
+                        print(" 💡 INFO: Pasang Gemini API Key atau jalankan Ollama di localhost:11434.")
                     print("--------------------------------------------------")
 
                     if kira_chat_history:
@@ -824,13 +919,32 @@ async def main():
                                 with open("gemini_key.txt", "w", encoding="utf-8") as f:
                                     f.write(new_key)
                                 GEMINI_API_KEY = new_key
-                                print(f" [✓] API Key disimpan ke 'gemini_key.txt'!")
+                                ai_engine_preference = "gemini"
+                                print(f" [✓] API Key disimpan ke 'gemini_key.txt'! Engine diset ke Gemini.")
+                            continue
+
+                        if user_input.lower().startswith('ollama'):
+                            parts = user_input.split()
+                            if len(parts) > 1:
+                                ollama_preferred_model = parts[1]
+                            ai_engine_preference = "ollama"
+                            o_ok, o_mods = check_ollama_status()
+                            if o_ok:
+                                print(f" [✓] Mode AI diset ke OLLAMA LOKAL (Model: {ollama_preferred_model})")
+                            else:
+                                print(f" [!] Peringatan: Ollama belum aktif di http://localhost:11434.")
+                                print(f"     Unduh & jalankan Ollama terlebih dahulu dari https://ollama.com/")
+                            continue
+
+                        if user_input.lower() == 'gemini':
+                            ai_engine_preference = "gemini"
+                            print(" [✓] Mode AI diset ke GEMINI CLOUD API.")
                             continue
 
                         ctx = f"Lagu saat ini: {cached_title} oleh {cached_artist}" if cached_title != "No Track" else ""
                         sys.stdout.write(" [Kira sedang berpikir...]\r")
                         sys.stdout.flush()
-                        emo, ans = await asyncio.to_thread(query_gemini_ai, user_input, ctx)
+                        emo, ans = await asyncio.to_thread(query_kira_ai, user_input, ctx)
                         ai_current_emotion = emo
                         ai_current_text    = ans
                         print(f" [Kira]: [{emo}] {ans}")
