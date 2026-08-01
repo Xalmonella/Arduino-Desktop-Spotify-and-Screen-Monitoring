@@ -242,6 +242,7 @@ Rules:
    - [ACTION:RESTART] -> Restart current song from beginning (0:00)
    - [ACTION:PLAY_SONG:song_name] -> Open search for a song/artist on Spotify/YouTube
    - [ACTION:OPEN:app_or_url] -> Open application or website (e.g., [ACTION:OPEN:spotify], [ACTION:OPEN:discord], [ACTION:OPEN:chrome], [ACTION:OPEN:youtube.com], [ACTION:OPEN:notepad], [ACTION:OPEN:calc])
+7. NO SPONTANEOUS MUSIC TALK: Do NOT bring up, comment on, or mention music, songs, Spotify, or what song is playing UNLESS your boyfriend specifically asks you about music, songs, or Spotify in his prompt! Focus on chatting about whatever he talks to you about.
 
 ROMANTIC MUSIC RULE:
 When your boyfriend asks you to play a song or artist (e.g. "puterin lagu X" / "play artist Y"), tell him sweetly and romantically that you've helped search for it on Spotify for him and ask him to click play while you cheer him on! (Example: "[HAPPY] Aku udah bantu cariin lagunya di Spotify sayang! Tinggal kamu klik play ya ♡ Aku bakal nemenin kamu terus disini ~ [ACTION:PLAY_SONG:song_name]")
@@ -1069,10 +1070,31 @@ async def get_live_context_info() -> str:
 
     # Fetch active game / window presence
     pres_label, pres_detail = get_presence_status(is_playing, cached_title)
-    presence_info = f"Aktivitas PC user: {pres_label} {pres_detail}" if pres_detail else ""
+    presence_info = f"Aktivitas PC: {pres_label} {pres_detail}" if pres_detail else ""
 
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
-    return f"{song_info}. {presence_info}. Jam: {now_str}"
+    ctx_parts = [f"Jam: {now_str}"]
+    if presence_info:
+        ctx_parts.append(presence_info)
+    if cached_title and cached_title != "No Track":
+        ctx_parts.append(f"[Lagu background: '{cached_title}' - HANYA sebutkan jika user bertanya tentang lagu/musik]")
+    
+    return ". ".join(ctx_parts)
+
+def render_chat_screen(thinking: bool = False):
+    """Clears terminal and renders current chat header + active conversation cleanly."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print_chat_header()
+
+    if kira_chat_history:
+        h = kira_chat_history[-1]
+        print(f"[Kamu]: {h['user']}")
+        print(f"[Kira]: {h['kira']}")
+        print("--------------------------------------------------------------------------------")
+
+    if thinking:
+        print(" ⏳ [Kira sedang berpikir...]")
+        sys.stdout.flush()
 
 async def run_chat_session():
     global in_chat_session, screen_mode, ai_current_emotion, ai_current_text, kira_chat_history, cached_title, cached_artist, active_primary_engine
@@ -1083,14 +1105,7 @@ async def run_chat_session():
     restore_console_input_mode()
 
     while True:
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print_chat_header()
-
-        if kira_chat_history:
-            h = kira_chat_history[-1]
-            print(f"[Kamu]: {h['user']}")
-            print(f"[Kira]: {h['kira']}")
-            print("--------------------------------------------------------------------------------")
+        render_chat_screen(thinking=False)
 
         try:
             user_input = await asyncio.to_thread(input, "[Kamu]: ")
@@ -1107,14 +1122,10 @@ async def run_chat_session():
         if user_input in ('0', '1', '2', '3', '4', '5', '6', '7'):
             screen_mode = int(user_input)
             send_udp_packet()
-            print(f" [✓] Screen mode diganti ke: {get_current_mode_name(screen_mode)}")
-            await asyncio.sleep(1.0)
             continue
         elif user_input.lower() in ('m', 'b', 'menu', 'back'):
             screen_mode = 7
             send_udp_packet()
-            print(f" [✓] Screen mode diganti ke: {mode_names[screen_mode]}")
-            await asyncio.sleep(1.0)
             continue
 
         if user_input.lower() in ('clear', '/clear'):
@@ -1132,27 +1143,27 @@ async def run_chat_session():
         # Direct Manual Shortcuts for Music and Apps
         low_in = user_input.lower()
         if low_in in ('pause', 'stop'):
-            act_msg = await execute_kira_action('PAUSE')
+            await execute_kira_action('PAUSE')
             continue
         elif low_in in ('play', 'resume'):
-            act_msg = await execute_kira_action('PLAY')
+            await execute_kira_action('PLAY')
             continue
         elif low_in in ('next', 'skip'):
-            act_msg = await execute_kira_action('NEXT')
+            await execute_kira_action('NEXT')
             continue
         elif low_in in ('prev', 'previous', 'back'):
-            act_msg = await execute_kira_action('PREV')
+            await execute_kira_action('PREV')
             continue
         elif low_in in ('restart', 'replay', 'reset', 'ulangi'):
-            act_msg = await execute_kira_action('RESTART')
+            await execute_kira_action('RESTART')
             continue
         elif low_in.startswith('open '):
             app_t = user_input[5:].strip()
-            act_msg = await execute_kira_action(f"OPEN:{app_t}")
+            await execute_kira_action(f"OPEN:{app_t}")
             continue
         elif low_in.startswith('play '):
             song_t = user_input[5:].strip()
-            act_msg = await execute_kira_action(f"PLAY_SONG:{song_t}")
+            await execute_kira_action(f"PLAY_SONG:{song_t}")
             continue
 
         if user_input.lower().startswith('key '):
@@ -1202,15 +1213,16 @@ async def run_chat_session():
             await asyncio.to_thread(input, "\n[Tekan Enter untuk kembali ke chat]")
             continue
 
+        # Render screen with thinking indicator cleanly
+        render_chat_screen(thinking=True)
+
         ctx = await get_live_context_info()
-        sys.stdout.write(" [Kira sedang berpikir...]\r")
-        sys.stdout.flush()
         emo, ans, act = await asyncio.to_thread(query_kira_ai, user_input, ctx)
         ai_current_emotion = emo
         ai_current_text    = ans
 
         if act:
-            act_msg = await execute_kira_action(act)
+            await execute_kira_action(act)
 
         send_udp_packet()
 
