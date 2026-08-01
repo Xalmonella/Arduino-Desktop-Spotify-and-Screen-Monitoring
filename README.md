@@ -31,3 +31,67 @@ Sistem Pemantauan Desktop, Informasi Spotify Now Playing, dan AI Companion ("Kir
    ```bash
    python spotify_sender.py
    ```
+
+## 🔑 Tutorial Setup Gemini API Key (Multi-Key Rotation)
+
+Sistem ini menggunakan **Gemini API** (Google AI) untuk fitur AI Companion "Kira". Mendukung **multi-key rotation** — jika satu key habis kuota (rate limit), otomatis pindah ke key berikutnya!
+
+### Langkah 1: Dapatkan API Key Gratis
+
+1. Buka **[Google AI Studio](https://aistudio.google.com/apikey)**
+2. Login dengan akun Google kamu
+3. Klik **"Create API Key"**
+4. Pilih project (atau buat baru) → klik **"Create API key in existing project"**
+5. **Copy** API key yang muncul (format: `AIzaSy...`)
+
+> 💡 **Tips**: Buat **3-5 API key** dari akun Google yang berbeda untuk rotasi otomatis!
+> Setiap key gratis mendapat kuota harian yang melimpah.
+
+### Langkah 2: Simpan Key ke File
+
+Edit file `gemini_key.txt`, tambahkan key satu per baris:
+
+```
+# Gemini API Keys (satu key per baris)
+# Baris dimulai # = komentar (diabaikan)
+AIzaSyA_key_pertama_dari_akun_1
+AIzaSyB_key_kedua_dari_akun_2
+AIzaSyC_key_ketiga_dari_akun_3
+```
+
+### Langkah 3: (Opsional) Tambah Key via Chat
+
+Saat sedang chat dengan Kira, kamu bisa tambah key langsung:
+
+```
+[Kamu]: key AIzaSyXXXX_key_utama     → Set key utama (replace semua)
+[Kamu]: addkey AIzaSyYYYY_key_baru   → Tambah key ke pool rotasi
+[Kamu]: keys                         → Lihat daftar key aktif
+```
+
+### Cara Kerja Auto-Rotation
+
+```
+Request Chat → Key #1 → Sukses? → Response ✅
+                  ↓ (429 Rate Limit)
+              Key #2 → Sukses? → Response ✅
+                  ↓ (429 Rate Limit)
+              Key #3 → Sukses? → Response ✅
+                  ↓ (Semua habis)
+              Offline Fallback Response 💬
+```
+
+- Sistem mencoba **5 model Gemini** per key: `gemini-3.5-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-2.0-flash`, `gemini-2.0-flash-lite`
+- Jika semua model pada Key #1 kena rate limit → otomatis pindah ke Key #2
+- Key terakhir yang berhasil diingat, sehingga request berikutnya langsung ke key aktif
+
+### Chat Commands Reference
+
+| Command | Fungsi |
+|---|---|
+| `key <KEY>` | Set API key utama (replace file) |
+| `addkey <KEY>` | Tambah key ke pool rotasi |
+| `keys` | Lihat semua key aktif (masked) |
+| `clear` | Hapus riwayat chat |
+| `exit` / `keluar` | Keluar dari chat session |
+| `0`-`7` | Ganti screen mode OLED |

@@ -233,23 +233,48 @@ Rules:
 5. Prefix response with an emotion tag in brackets: [HAPPY], [TALK], [BLUSH], [WINK], or [SURPRISED].
 """
 
-def get_gemini_key() -> str:
-    """Reads Gemini API Key from env GEMINI_API_KEY or gemini_key.txt file."""
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not key and os.path.exists("gemini_key.txt"):
+def get_gemini_keys() -> list[str]:
+    """Reads all Gemini API Keys from env and gemini_key.txt (one key per line).
+    Lines starting with # or empty lines are ignored.
+    If one key hits rate limit, the system auto-rotates to the next key."""
+    keys = []
+    env_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if env_key and env_key != "YOUR_GEMINI_API_KEY_HERE":
+        keys.append(env_key)
+    if os.path.exists("gemini_key.txt"):
         try:
             with open("gemini_key.txt", "r", encoding="utf-8") as f:
-                key = f.read().strip()
+                for line in f:
+                    k = line.strip()
+                    if k and not k.startswith("#") and k != "YOUR_GEMINI_API_KEY_HERE":
+                        if k not in keys:  # hindari duplikat
+                            keys.append(k)
         except Exception:
             pass
-    return key
+    return keys
 
-GEMINI_API_KEY = get_gemini_key()
+_gemini_key_index = 0  # Tracks last successful key index for rotation
 
-# Ollama Engine Settings
-OLLAMA_HOST = "http://localhost:11434"
-ollama_preferred_model = "llama3.2"
-ai_engine_preference  = "auto" # 'auto', 'gemini', 'ollama'
+def get_groq_keys() -> list[str]:
+    """Reads all Groq API Keys from env and groq_key.txt (one key per line).
+    Lines starting with # or empty lines are ignored."""
+    keys = []
+    env_key = os.getenv("GROQ_API_KEY", "").strip()
+    if env_key:
+        keys.append(env_key)
+    if os.path.exists("groq_key.txt"):
+        try:
+            with open("groq_key.txt", "r", encoding="utf-8") as f:
+                for line in f:
+                    k = line.strip()
+                    if k and not k.startswith("#"):
+                        if k not in keys:
+                            keys.append(k)
+        except Exception:
+            pass
+    return keys
+
+_groq_key_index = 0  # Tracks last successful Groq key index for rotation
 
 ai_current_emotion = "HAPPY"
 ai_current_text    = "Halo sayang! Aku Kira, pacar AI kamu! ( > ‿ < ) ♡"
@@ -299,20 +324,21 @@ def get_offline_kira_response(user_prompt: str) -> tuple[str, str]:
         return random.choice(OFFLINE_RESPONSES["general"])
 
 def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
-    """Queries Google Gemini API with multi-turn conversation memory, or falls back offline."""
-    global GEMINI_API_KEY, kira_chat_history
-    GEMINI_API_KEY = get_gemini_key()
-    
-    if not GEMINI_API_KEY or GEMINI_API_KEY.strip() in ("", "YOUR_GEMINI_API_KEY_HERE"):
-        emo, ans = get_offline_kira_response(user_prompt)
-        kira_chat_history.append({"user": user_prompt, "kira": f"[{emo}] {ans}"})
-        return emo, ans
+    """Queries Gemini API with multi-key rotation.
+    Tries all keys × all models. If 429 rate limited, rotates to next key/model.
+    Falls back to offline response if all keys exhausted."""
+    global kira_chat_history, _gemini_key_index
 
+    all_keys = get_gemini_keys()
+    if not all_keys:
+        return "", ""  # No Gemini keys — let query_kira_ai try Groq
+
+    # Build multi-turn conversation payload
     contents = []
     for h in kira_chat_history[-6:]:
         contents.append({"role": "user", "parts": [{"text": h["user"]}]})
         contents.append({"role": "model", "parts": [{"text": h["kira"]}]})
-        
+
     current_text = f"Context: {context_info}\nUser prompt: {user_prompt}" if context_info else user_prompt
     contents.append({"role": "user", "parts": [{"text": current_text}]})
 
@@ -327,55 +353,64 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
     }
     req_bytes = json.dumps(data_payload).encode('utf-8')
 
-    rate_limited = False
     models_to_try = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
-    for model_name in models_to_try:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY.strip()}"
-            headers = {"Content-Type": "application/json"}
-            req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                res_json = json.loads(resp.read().decode('utf-8'))
-                parts = res_json['candidates'][0]['content']['parts']
-                raw_text = " ".join(p['text'] for p in parts if 'text' in p and p['text']).strip()
 
-                emotion = "HAPPY"
-                if raw_text.startswith("[") and "]" in raw_text:
-                    tag = raw_text[1:raw_text.find("]")].upper()
-                    if tag in ("HAPPY", "TALK", "BLUSH", "WINK", "SURPRISED"):
-                        emotion = tag
-                    raw_text = raw_text[raw_text.find("]")+1:].strip()
+    # Start from last successful key index (smart rotation)
+    start_idx = _gemini_key_index % len(all_keys)
+    exhausted_keys = []  # Track which keys hit 429
 
-                clean_res = clean_text_for_oled(raw_text)
-                kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
-                return emotion, clean_res[:180]
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                rate_limited = True
-            continue
-        except Exception:
-            continue
+    for key_offset in range(len(all_keys)):
+        key_idx = (start_idx + key_offset) % len(all_keys)
+        api_key = all_keys[key_idx]
 
-    emo, ans = get_offline_kira_response(user_prompt)
-    return emo, ans
+        for model_name in models_to_try:
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
+                headers = {"Content-Type": "application/json"}
+                req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    res_json = json.loads(resp.read().decode('utf-8'))
+                    parts = res_json['candidates'][0]['content']['parts']
+                    raw_text = " ".join(p['text'] for p in parts if 'text' in p and p['text']).strip()
 
-def check_ollama_status() -> tuple[bool, list[str]]:
-    """Checks if local Ollama server is running (http://localhost:11434) and lists models."""
-    try:
-        url = f"{OLLAMA_HOST}/api/tags"
-        req = urllib.request.Request(url, method='GET')
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            models = [m['name'] for m in data.get('models', [])]
-            return True, models
-    except Exception:
-        return False, []
+                    emotion = "HAPPY"
+                    if raw_text.startswith("[") and "]" in raw_text:
+                        tag = raw_text[1:raw_text.find("]")].upper()
+                        if tag in ("HAPPY", "TALK", "BLUSH", "WINK", "SURPRISED"):
+                            emotion = tag
+                        raw_text = raw_text[raw_text.find("]")+1:].strip()
 
-def query_ollama_ai(user_prompt: str, context_info: str = "", model_name: str = "") -> tuple[str, str]:
-    """Queries local Ollama instance (http://localhost:11434) with conversation memory."""
-    global kira_chat_history, ollama_preferred_model
-    target_model = model_name if model_name else ollama_preferred_model
+                    clean_res = clean_text_for_oled(raw_text)
+                    kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
+                    _gemini_key_index = key_idx  # Remember last working key
+                    return emotion, clean_res[:180]
 
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    if key_idx not in exhausted_keys:
+                        exhausted_keys.append(key_idx)
+                        masked = api_key[:8] + "..." if len(api_key) > 8 else api_key
+                        print(f"\n [🔄 Key #{key_idx+1} ({masked}) rate limited, rotating...]")
+                    continue  # Try next model, then next key
+                continue
+            except Exception:
+                continue
+
+    # All keys & models exhausted — return empty to let query_kira_ai try Groq
+    if exhausted_keys:
+        print(f"\n [⚠️ Semua {len(exhausted_keys)} Gemini key habis kuota! Mencoba Groq...]")
+    return "", ""
+
+def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
+    """Queries Groq API (OpenAI-compatible) with multi-key rotation.
+    Ultra-fast inference using Groq LPU. Falls back silently if no keys."""
+    global kira_chat_history, _groq_key_index
+
+    all_keys = get_groq_keys()
+    if not all_keys:
+        return "", ""  # No Groq keys → skip silently
+
+    # Build OpenAI-compatible chat messages
     messages = [{"role": "system", "content": KIRA_SYSTEM_PROMPT}]
     for h in kira_chat_history[-6:]:
         messages.append({"role": "user", "content": h["user"]})
@@ -384,67 +419,84 @@ def query_ollama_ai(user_prompt: str, context_info: str = "", model_name: str = 
     user_content = f"Context: {context_info}\nUser prompt: {user_prompt}" if context_info else user_prompt
     messages.append({"role": "user", "content": user_content})
 
-    payload = {
-        "model": target_model,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "temperature": 0.8,
-            "num_predict": 120
-        }
-    }
-    req_bytes = json.dumps(payload).encode('utf-8')
+    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it", "mixtral-8x7b-32768"]
 
-    url = f"{OLLAMA_HOST}/api/chat"
-    headers = {"Content-Type": "application/json"}
-    req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        res_json = json.loads(resp.read().decode('utf-8'))
-        raw_text = res_json.get("message", {}).get("content", "").strip()
+    start_idx = _groq_key_index % len(all_keys)
+    exhausted_keys = []
 
-        emotion = "HAPPY"
-        if raw_text.startswith("[") and "]" in raw_text:
-            tag = raw_text[1:raw_text.find("]")].upper()
-            if tag in ("HAPPY", "TALK", "BLUSH", "WINK", "SURPRISED"):
-                emotion = tag
-            raw_text = raw_text[raw_text.find("]") + 1:].strip()
+    for key_offset in range(len(all_keys)):
+        key_idx = (start_idx + key_offset) % len(all_keys)
+        api_key = all_keys[key_idx]
 
-        clean_res = clean_text_for_oled(raw_text)
-        kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
-        return emotion, clean_res[:180]
+        for model_name in models_to_try:
+            try:
+                payload = {
+                    "model": model_name,
+                    "messages": messages,
+                    "max_tokens": 300,
+                    "temperature": 0.8
+                }
+                req_bytes = json.dumps(payload).encode('utf-8')
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key.strip()}"
+                }
+                req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    res_json = json.loads(resp.read().decode('utf-8'))
+                    raw_text = res_json['choices'][0]['message']['content'].strip()
+
+                    emotion = "HAPPY"
+                    if raw_text.startswith("[") and "]" in raw_text:
+                        tag = raw_text[1:raw_text.find("]")].upper()
+                        if tag in ("HAPPY", "TALK", "BLUSH", "WINK", "SURPRISED"):
+                            emotion = tag
+                        raw_text = raw_text[raw_text.find("]")+1:].strip()
+
+                    clean_res = clean_text_for_oled(raw_text)
+                    kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
+                    _groq_key_index = key_idx
+                    return emotion, clean_res[:180]
+
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    if key_idx not in exhausted_keys:
+                        exhausted_keys.append(key_idx)
+                        masked = api_key[:8] + "..." if len(api_key) > 8 else api_key
+                        print(f"\n [🔄 Groq Key #{key_idx+1} ({masked}) rate limited, rotating...]")
+                    continue
+                continue
+            except Exception:
+                continue
+
+    if exhausted_keys:
+        print(f"\n [⚠️ Semua {len(exhausted_keys)} Groq key habis kuota!]")
+    return "", ""
 
 def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
-    """Unified AI Router: Tries Gemini Cloud API -> Ollama Local AI -> Offline fallback."""
-    global ai_engine_preference, kira_chat_history
+    """Unified AI Router: Gemini → Groq → Offline fallback."""
+    global kira_chat_history
 
-    # 1. Manual Ollama preference
-    if ai_engine_preference == "ollama":
-        try:
-            return query_ollama_ai(user_prompt, context_info)
-        except Exception as e:
-            print(f"\n [⚠️ Ollama Local Error]: {e}")
+    # 1. Gemini Cloud API with multi-key rotation
+    try:
+        emo, ans = query_gemini_ai(user_prompt, context_info)
+        if ans:
+            return emo, ans
+    except Exception:
+        pass
 
-    # 2. Gemini Cloud API
-    key = get_gemini_key()
-    if key and key.strip() not in ("", "YOUR_GEMINI_API_KEY_HERE"):
-        try:
-            emo, ans = query_gemini_ai(user_prompt, context_info)
-            if ans:
-                return emo, ans
-        except Exception:
-            pass
+    # 2. Groq Cloud API with multi-key rotation
+    try:
+        emo, ans = query_groq_ai(user_prompt, context_info)
+        if ans:
+            return emo, ans
+    except Exception:
+        pass
 
-    # 3. Fallback to local Ollama if Gemini key missing or failed
-    ollama_ok, models = check_ollama_status()
-    if ollama_ok and models:
-        try:
-            return query_ollama_ai(user_prompt, context_info)
-        except Exception as e:
-            print(f"\n [⚠️ Ollama Fallback Error]: {e}")
-
-    # 4. Final offline fallback
+    # 3. Final offline fallback
     emo, ans = get_offline_kira_response(user_prompt)
-    kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion if 'emotion' in locals() else 'HAPPY'}] {ans}"})
+    kira_chat_history.append({"user": user_prompt, "kira": f"[{emo}] {ans}"})
     return emo, ans
 
 # =============================================================================
@@ -756,8 +808,169 @@ def background_udp_loop():
 udp_thread = threading.Thread(target=background_udp_loop, daemon=True)
 udp_thread.start()
 
+def restore_console_input_mode():
+    """Restores standard Windows console line input and character echo after msvcrt calls."""
+    if os.name == 'nt':
+        try:
+            kernel32 = ctypes.windll.kernel32
+            h_stdin = kernel32.GetStdHandle(-10)
+            kernel32.SetConsoleMode(h_stdin, 0x0001 | 0x0002 | 0x0004 | 0x0040 | 0x0080)
+        except Exception:
+            pass
+def print_chat_header():
+    print("==================================================")
+    print(" 💬 CHAT SESSION WITH KIRA AI (Pacar AI Kamu)")
+    print(" (Ketik 'exit' atau 'keluar' untuk selesai)")
+    print(" (Ketik 'clear' untuk hapus riwayat chat)")
+    print(" (Ketik 'key <API_KEY>' untuk set Gemini API Key)")
+    print(" (Ketik 'addkey <API_KEY>' untuk tambah key rotasi)")
+    print(" (Ketik 'groqkey <API_KEY>' untuk set Groq API Key)")
+    print(" (Ketik 'keys' untuk lihat daftar semua API key aktif)")
+    print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen)")
+    print("==================================================")
+    sys.stdout.flush()
+
+    gemini_keys = get_gemini_keys()
+    groq_keys = get_groq_keys()
+    if gemini_keys:
+        masked = gemini_keys[0][:8] + "..." if len(gemini_keys[0]) > 8 else gemini_keys[0]
+        print(f" [✓] GEMINI: {len(gemini_keys)} key aktif (utama: {masked})")
+    else:
+        print(" [✗] GEMINI: Belum ada key. Ketik 'key <API_KEY>'")
+    if groq_keys:
+        masked = groq_keys[0][:8] + "..." if len(groq_keys[0]) > 8 else groq_keys[0]
+        print(f" [✓] GROQ:   {len(groq_keys)} key aktif (utama: {masked})")
+    else:
+        print(" [✗] GROQ:   Belum ada key. Ketik 'groqkey <API_KEY>'")
+    total = len(gemini_keys) + len(groq_keys)
+    if total > 0:
+        print(f" [🔄] Flow: Gemini ({len(gemini_keys)} key) → Groq ({len(groq_keys)} key) → Offline")
+    print("--------------------------------------------------")
+
+async def run_chat_session():
+    global in_chat_session, screen_mode, ai_current_emotion, ai_current_text, kira_chat_history, cached_title, cached_artist
+
+    in_chat_session = True
+    screen_mode = 4
+
+    for _ in range(3):
+        send_udp_packet()
+
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print_chat_header()
+
+    if kira_chat_history:
+        print("📜 Riwayat Obrolan Sebelumnya:")
+        for h in kira_chat_history[-5:]:
+            print(f"  [Kamu]: {h['user']}")
+            print(f"  [Kira]: {h['kira']}")
+        print("--------------------------------------------------")
+
+    restore_console_input_mode()
+
+    while True:
+        try:
+            user_input = await asyncio.to_thread(input, "\n[Kamu]: ")
+            user_input = user_input.strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ('exit', 'quit', 'keluar', 'back'):
+            break
+
+        if user_input in ('0', '1', '2', '3', '4', '5', '6', '7'):
+            screen_mode = int(user_input)
+            for _ in range(3):
+                send_udp_packet()
+            print(f" [✓] Screen mode diganti ke: {get_current_mode_name(screen_mode)}")
+            continue
+        elif user_input.lower() in ('m', 'b', 'menu', 'back'):
+            screen_mode = 7
+            for _ in range(3):
+                send_udp_packet()
+            print(f" [✓] Screen mode diganti ke: {mode_names[screen_mode]}")
+            continue
+
+        if user_input.lower() in ('clear', '/clear'):
+            kira_chat_history.clear()
+            os.system('cls' if os.name == 'nt' else 'clear')
+            print_chat_header()
+            print(" [✓] Riwayat obrolan telah dibersihkan.")
+            print("--------------------------------------------------")
+            continue
+
+        if user_input.lower().startswith('key '):
+            new_key = user_input[4:].strip()
+            if new_key:
+                with open("gemini_key.txt", "w", encoding="utf-8") as f:
+                    f.write("# Gemini API Keys (satu key per baris, auto-rotation jika rate limited)\n")
+                    f.write(new_key + "\n")
+                print(f" [✓] API Key disimpan ke 'gemini_key.txt'! Total: {len(get_gemini_keys())} key aktif.")
+            continue
+
+        if user_input.lower().startswith('addkey '):
+            new_key = user_input[7:].strip()
+            if new_key:
+                with open("gemini_key.txt", "a", encoding="utf-8") as f:
+                    f.write(new_key + "\n")
+                all_k = get_gemini_keys()
+                print(f" [✓] API Key ditambahkan! Total: {len(all_k)} key aktif untuk rotasi.")
+            continue
+
+        if user_input.lower().startswith('groqkey '):
+            new_key = user_input[8:].strip()
+            if new_key:
+                with open("groq_key.txt", "a", encoding="utf-8") as f:
+                    f.write(new_key + "\n")
+                all_k = get_groq_keys()
+                print(f" [✓] Groq API Key ditambahkan! Total: {len(all_k)} Groq key aktif.")
+            continue
+
+        if user_input.lower() == 'keys':
+            gemini_k = get_gemini_keys()
+            groq_k = get_groq_keys()
+            print(f"\n [🔑] === DAFTAR API KEY AKTIF ===")
+            if gemini_k:
+                print(f"  GEMINI ({len(gemini_k)} key):")
+                for i, k in enumerate(gemini_k, 1):
+                    masked = k[:8] + "..." + k[-4:] if len(k) > 12 else k
+                    status = " <- aktif" if (i-1) == (_gemini_key_index % len(gemini_k)) else ""
+                    print(f"     [{i}] {masked}{status}")
+            else:
+                print("  GEMINI: (kosong) - Ketik 'key <API_KEY>'")
+            if groq_k:
+                print(f"  GROQ ({len(groq_k)} key):")
+                for i, k in enumerate(groq_k, 1):
+                    masked = k[:8] + "..." + k[-4:] if len(k) > 12 else k
+                    status = " <- aktif" if (i-1) == (_groq_key_index % len(groq_k)) else ""
+                    print(f"     [{i}] {masked}{status}")
+            else:
+                print("  GROQ:   (kosong) - Ketik 'groqkey <API_KEY>'")
+            print(f"  Flow: Gemini -> Groq -> Offline")
+            continue
+
+        ctx = f"Lagu saat ini: {cached_title} oleh {cached_artist}" if cached_title != "No Track" else ""
+        sys.stdout.write(" [Kira sedang berpikir...]\r")
+        sys.stdout.flush()
+        emo, ans = await asyncio.to_thread(query_kira_ai, user_input, ctx)
+        ai_current_emotion = emo
+        ai_current_text    = ans
+        print(f" [Kira]: [{emo}] {ans}")
+
+        for _ in range(3):
+            send_udp_packet()
+            await asyncio.sleep(0.02)
+
+    in_chat_session = False
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print_menu_header()
+    init_status_line()
+
 async def main():
-    global current_track_id, cached_title, cached_artist, ai_current_emotion, ai_current_text, kira_chat_history, GEMINI_API_KEY, screen_mode, is_playing, pos_ms, dur_ms, start_chat_immediately, menu_cursor_idx
+    global current_track_id, cached_title, cached_artist, ai_current_emotion, ai_current_text, kira_chat_history, screen_mode, is_playing, pos_ms, dur_ms, start_chat_immediately, menu_cursor_idx, in_chat_session
 
     print_menu_header()
     init_status_line()
@@ -851,122 +1064,8 @@ async def main():
                     screen_mode = 70 + menu_cursor_idx
                     mode_changed = True
                 elif ch in (b'c', b'C'):
-                    in_chat_session = True
-                    screen_mode = 4
-
-                    # Send immediate UDP packet to switch ESP32 to Screen 4
-                    for _ in range(3):
-                        send_udp_packet()
-
-                    os.system('cls' if os.name == 'nt' else 'clear')
-                    print("==================================================")
-                    print(" 💬 CHAT SESSION WITH KIRA AI (Pacar AI Kamu)")
-                    print(" (Ketik 'exit' atau tekan Enter kosong untuk selesai)")
-                    print(" (Ketik 'clear' untuk hapus riwayat chat)")
-                    print(" (Ketik 'key <API_KEY>' untuk simpan Gemini API Key)")
-                    print(" (Ketik 'ollama [model]' untuk pakai Ollama Lokal)")
-                    print(" (Ketik 'gemini' untuk pakai Gemini Cloud API)")
-                    print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen)")
-                    print("==================================================")
-                    
-                    current_key = get_gemini_key()
-                    ollama_active, o_models = check_ollama_status()
-
-                    if ai_engine_preference == "ollama":
-                        print(f" [✓] Mode AI: OLLAMA LOKAL ({ollama_preferred_model})")
-                    elif current_key:
-                        print(f" [✓] Mode AI: GEMINI CLOUD API ({current_key[:10]}...)")
-                    elif ollama_active:
-                        print(f" [✓] Mode AI: OLLAMA LOKAL (Terdeteksi model: {', '.join(o_models[:3])})")
-                    else:
-                        print(" 💡 INFO: Pasang Gemini API Key atau jalankan Ollama di localhost:11434.")
-                    print("--------------------------------------------------")
-
-                    if kira_chat_history:
-                        print("📜 Riwayat Obrolan Sebelumnya:")
-                        for h in kira_chat_history[-5:]:
-                            print(f"  [Kamu]: {h['user']}")
-                            print(f"  [Kira]: {h['kira']}")
-                        print("--------------------------------------------------")
-                    
-                    while True:
-                        try:
-                            user_input = await asyncio.to_thread(input, "\n[Kamu]: ")
-                            user_input = user_input.strip()
-                        except (EOFError, KeyboardInterrupt):
-                            break
-
-                        if not user_input or user_input.lower() == 'exit':
-                            break
-                        
-                        if user_input in ('0', '1', '2', '3', '4', '5', '6', '7'):
-                            screen_mode = int(user_input)
-                            for _ in range(3):
-                                send_udp_packet()
-                            print(f" [✓] Screen mode diganti ke: {get_current_mode_name(screen_mode)}")
-                            continue
-                        elif user_input.lower() in ('m', 'b', 'menu', 'back'):
-                            screen_mode = 7
-                            for _ in range(3):
-                                send_udp_packet()
-                            print(f" [✓] Screen mode diganti ke: {mode_names[screen_mode]}")
-                            continue
-
-                        if user_input.lower() in ('clear', '/clear'):
-                            kira_chat_history.clear()
-                            os.system('cls' if os.name == 'nt' else 'clear')
-                            print("==================================================")
-                            print(" 💬 CHAT SESSION WITH KIRA AI")
-                            print(" [✓] Riwayat obrolan telah dibersihkan.")
-                            print("==================================================")
-                            continue
-
-                        if user_input.lower().startswith('key '):
-                            new_key = user_input[4:].strip()
-                            if new_key:
-                                with open("gemini_key.txt", "w", encoding="utf-8") as f:
-                                    f.write(new_key)
-                                GEMINI_API_KEY = new_key
-                                ai_engine_preference = "gemini"
-                                print(f" [✓] API Key disimpan ke 'gemini_key.txt'! Engine diset ke Gemini.")
-                            continue
-
-                        if user_input.lower().startswith('ollama'):
-                            parts = user_input.split()
-                            if len(parts) > 1:
-                                ollama_preferred_model = parts[1]
-                            ai_engine_preference = "ollama"
-                            o_ok, o_mods = check_ollama_status()
-                            if o_ok:
-                                print(f" [✓] Mode AI diset ke OLLAMA LOKAL (Model: {ollama_preferred_model})")
-                            else:
-                                print(f" [!] Peringatan: Ollama belum aktif di http://localhost:11434.")
-                                print(f"     Unduh & jalankan Ollama terlebih dahulu dari https://ollama.com/")
-                            continue
-
-                        if user_input.lower() == 'gemini':
-                            ai_engine_preference = "gemini"
-                            print(" [✓] Mode AI diset ke GEMINI CLOUD API.")
-                            continue
-
-                        ctx = f"Lagu saat ini: {cached_title} oleh {cached_artist}" if cached_title != "No Track" else ""
-                        sys.stdout.write(" [Kira sedang berpikir...]\r")
-                        sys.stdout.flush()
-                        emo, ans = await asyncio.to_thread(query_kira_ai, user_input, ctx)
-                        ai_current_emotion = emo
-                        ai_current_text    = ans
-                        print(f" [Kira]: [{emo}] {ans}")
-
-                        # Burst send final answer to ESP32 OLED to ensure instant delivery
-                        for _ in range(3):
-                            send_udp_packet()
-                            await asyncio.sleep(0.02)
-
-                    # Clean terminal screen upon chat exit and restore menu header
-                    in_chat_session = False
-                    os.system('cls' if os.name == 'nt' else 'clear')
-                    print_menu_header()
-                    init_status_line()
+                    await run_chat_session()
+                    mode_changed = True
                     mode_changed = True
 
                 if mode_changed:
