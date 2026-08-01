@@ -669,8 +669,12 @@ def init_status_line():
     sys.stdout.flush()
     _status_line_ready = True
 
+in_chat_session = False
+
 def update_status_display(title: str, artist: str, mode_name: str):
     """Always overwrites the SAME single line. Never stacks. Never adds history."""
+    if in_chat_session:
+        return
     if title and title != "No Track":
         track_str = f"Diputar: {title} - {artist}"
     else:
@@ -847,6 +851,7 @@ async def main():
                     screen_mode = 70 + menu_cursor_idx
                     mode_changed = True
                 elif ch in (b'c', b'C'):
+                    in_chat_session = True
                     screen_mode = 4
 
                     # Send immediate UDP packet to switch ESP32 to Screen 4
@@ -855,7 +860,7 @@ async def main():
 
                     os.system('cls' if os.name == 'nt' else 'clear')
                     print("==================================================")
-                    print(" 💬 CHAT SESSION WITH KIRA AI (Kira Desk Companion)")
+                    print(" 💬 CHAT SESSION WITH KIRA AI (Pacar AI Kamu)")
                     print(" (Ketik 'exit' atau tekan Enter kosong untuk selesai)")
                     print(" (Ketik 'clear' untuk hapus riwayat chat)")
                     print(" (Ketik 'key <API_KEY>' untuk simpan Gemini API Key)")
@@ -885,9 +890,12 @@ async def main():
                         print("--------------------------------------------------")
                     
                     while True:
-                        sys.stdout.write("\n[Kamu]: ")
-                        sys.stdout.flush()
-                        user_input = sys.stdin.readline().strip()
+                        try:
+                            user_input = await asyncio.to_thread(input, "\n[Kamu]: ")
+                            user_input = user_input.strip()
+                        except (EOFError, KeyboardInterrupt):
+                            break
+
                         if not user_input or user_input.lower() == 'exit':
                             break
                         
@@ -955,8 +963,10 @@ async def main():
                             await asyncio.sleep(0.02)
 
                     # Clean terminal screen upon chat exit and restore menu header
+                    in_chat_session = False
                     os.system('cls' if os.name == 'nt' else 'clear')
                     print_menu_header()
+                    init_status_line()
                     mode_changed = True
 
                 if mode_changed:
