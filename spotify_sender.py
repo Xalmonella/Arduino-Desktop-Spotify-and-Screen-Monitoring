@@ -231,7 +231,105 @@ Rules:
 3. Keep responses natural, loving, intelligent, and complete (max 30 to 45 words / max 180 characters).
 4. Write in clean, natural Indonesian (use "aku", "kamu", "sayang", "hehe", "semangat pacarku! ♡").
 5. Prefix response with an emotion tag in brackets: [HAPPY], [TALK], [BLUSH], [WINK], or [SURPRISED].
+6. DESKTOP & MUSIC CONTROL ACTIONS: You have direct access to control the user's laptop and music!
+   If requested or appropriate, append ONE action tag at the VERY END of your response:
+   - [ACTION:PLAY] -> Resume/Play music
+   - [ACTION:PAUSE] -> Pause music
+   - [ACTION:NEXT] -> Skip to next song
+   - [ACTION:PREV] -> Go to previous song
+   - [ACTION:PLAY_SONG:song_name] -> Search and play a recommended song on YouTube/Spotify
+   - [ACTION:OPEN:app_or_url] -> Open application or website (e.g., [ACTION:OPEN:spotify], [ACTION:OPEN:discord], [ACTION:OPEN:chrome], [ACTION:OPEN:youtube.com], [ACTION:OPEN:notepad], [ACTION:OPEN:calc])
+Only include an ACTION tag if the user asks you to control something or if it fits naturally in conversation.
 """
+
+import urllib.parse
+import webbrowser
+
+def parse_kira_action(raw_text: str) -> tuple[str, str]:
+    """Extracts [ACTION:...] tag from Kira's response text and returns (clean_text, action_str)."""
+    action_str = ""
+    if "[ACTION:" in raw_text:
+        start_idx = raw_text.find("[ACTION:")
+        end_idx = raw_text.find("]", start_idx)
+        if end_idx != -1:
+            action_tag = raw_text[start_idx:end_idx+1]
+            action_str = action_tag[8:-1].strip()
+            raw_text = raw_text.replace(action_tag, "").strip()
+    return raw_text, action_str
+
+async def execute_kira_action(action_str: str) -> str:
+    """Executes desktop actions requested by Kira AI or direct commands."""
+    if not action_str:
+        return ""
+
+    action_str = action_str.strip()
+
+    # 1. Media Playback Controls via WinRT
+    if action_str.upper() in ("PLAY", "RESUME"):
+        try:
+            manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = manager.get_current_session() if manager else None
+            if session:
+                await session.try_play_async()
+                return "▶ Musik Diputar/Resume"
+        except Exception:
+            pass
+
+    elif action_str.upper() in ("PAUSE", "STOP"):
+        try:
+            manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = manager.get_current_session() if manager else None
+            if session:
+                await session.try_pause_async()
+                return "⏸ Musik Dipause"
+        except Exception:
+            pass
+
+    elif action_str.upper() in ("NEXT", "SKIP"):
+        try:
+            manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = manager.get_current_session() if manager else None
+            if session:
+                await session.try_skip_next_async()
+                return "⏭ Skip ke Lagu Berikutnya"
+        except Exception:
+            pass
+
+    elif action_str.upper() in ("PREV", "PREVIOUS"):
+        try:
+            manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = manager.get_current_session() if manager else None
+            if session:
+                await session.try_skip_previous_async()
+                return "⏮ Kembali ke Lagu Sebelumnya"
+        except Exception:
+            pass
+
+    # 2. Play Recommended Song on YouTube / Spotify
+    elif action_str.upper().startswith("PLAY_SONG:") or action_str.upper().startswith("SEARCH_SONG:"):
+        query = action_str.split(":", 1)[1].strip()
+        if query:
+            url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+            webbrowser.open(url)
+            return f"🎵 Membuka pencarian lagu '{query}' di YouTube"
+
+    # 3. Open Apps or Websites
+    elif action_str.upper().startswith("OPEN:"):
+        target = action_str.split(":", 1)[1].strip()
+        if target:
+            low_t = target.lower()
+            if low_t.startswith("http://") or low_t.startswith("https://") or ("." in low_t and not low_t.endswith(".exe")):
+                url = target if target.startswith("http") else f"https://{target}"
+                webbrowser.open(url)
+                return f"🌐 Membuka website: {url}"
+            else:
+                try:
+                    subprocess.Popen(f"start {target}", shell=True)
+                    return f"🚀 Membuka aplikasi: {target}"
+                except Exception:
+                    pass
+
+    return ""
 
 def get_gemini_keys() -> list[str]:
     """Reads all Gemini API Keys from env and gemini_key.txt (one key per line).
@@ -380,10 +478,11 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
                             emotion = tag
                         raw_text = raw_text[raw_text.find("]")+1:].strip()
 
+                    raw_text, action_str = parse_kira_action(raw_text)
                     clean_res = clean_text_for_oled(raw_text)
                     kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
                     _gemini_key_index = key_idx  # Remember last working key
-                    return emotion, clean_res[:180]
+                    return emotion, clean_res[:180], action_str
 
             except urllib.error.HTTPError as e:
                 if e.code == 429:
@@ -399,16 +498,16 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
     # All keys & models exhausted — return empty to let query_kira_ai try Groq
     if exhausted_keys:
         print(f"\n [⚠️ Semua {len(exhausted_keys)} Gemini key habis kuota! Mencoba Groq...]")
-    return "", ""
+    return "", "", ""
 
-def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
+def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str, str]:
     """Queries Groq API (OpenAI-compatible) with multi-key rotation.
     Ultra-fast inference using Groq LPU. Falls back silently if no keys."""
     global kira_chat_history, _groq_key_index
 
     all_keys = get_groq_keys()
     if not all_keys:
-        return "", ""  # No Groq keys → skip silently
+        return "", "", ""  # No Groq keys → skip silently
 
     # Build OpenAI-compatible chat messages
     messages = [{"role": "system", "content": KIRA_SYSTEM_PROMPT}]
@@ -455,10 +554,11 @@ def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
                             emotion = tag
                         raw_text = raw_text[raw_text.find("]")+1:].strip()
 
+                    raw_text, action_str = parse_kira_action(raw_text)
                     clean_res = clean_text_for_oled(raw_text)
                     kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
                     _groq_key_index = key_idx
-                    return emotion, clean_res[:180]
+                    return emotion, clean_res[:180], action_str
 
             except urllib.error.HTTPError as e:
                 if e.code == 429:
@@ -473,11 +573,11 @@ def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
 
     if exhausted_keys:
         print(f"\n [⚠️ Semua {len(exhausted_keys)} Groq key habis kuota!]")
-    return "", ""
+    return "", "", ""
 
 active_primary_engine = "groq" if get_groq_keys() else "gemini"
 
-def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
+def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str, str]:
     """Unified AI Router with Sticky Engine Rotation:
     Stays on active_primary_engine until rate limited, then automatically switches to the other engine and stays there."""
     global kira_chat_history, active_primary_engine
@@ -485,45 +585,45 @@ def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
     if active_primary_engine == "groq":
         # 1. Try Groq first
         try:
-            emo, ans = query_groq_ai(user_prompt, context_info)
+            emo, ans, act = query_groq_ai(user_prompt, context_info)
             if ans:
-                return emo, ans
+                return emo, ans, act
         except Exception:
             pass
 
         # 2. Groq failed -> Failover to Gemini and STAY on Gemini
         try:
-            emo, ans = query_gemini_ai(user_prompt, context_info)
+            emo, ans, act = query_gemini_ai(user_prompt, context_info)
             if ans:
                 active_primary_engine = "gemini"
                 print("\n [🔄 Active Engine otomatis beralih ke GEMINI]")
-                return emo, ans
+                return emo, ans, act
         except Exception:
             pass
 
     else:  # active_primary_engine == "gemini"
         # 1. Try Gemini first
         try:
-            emo, ans = query_gemini_ai(user_prompt, context_info)
+            emo, ans, act = query_gemini_ai(user_prompt, context_info)
             if ans:
-                return emo, ans
+                return emo, ans, act
         except Exception:
             pass
 
         # 2. Gemini failed -> Failover to Groq and STAY on Groq
         try:
-            emo, ans = query_groq_ai(user_prompt, context_info)
+            emo, ans, act = query_groq_ai(user_prompt, context_info)
             if ans:
                 active_primary_engine = "groq"
                 print("\n [🔄 Active Engine otomatis beralih ke GROQ]")
-                return emo, ans
+                return emo, ans, act
         except Exception:
             pass
 
     # 3. Final offline fallback if all engines failed
     emo, ans = get_offline_kira_response(user_prompt)
     kira_chat_history.append({"user": user_prompt, "kira": f"[{emo}] {ans}"})
-    return emo, ans
+    return emo, ans, ""
 
 # =============================================================================
 # SYSTEM STATISTICS MONITORING ENGINE (psutil & nvidia-smi)
@@ -982,6 +1082,35 @@ async def run_chat_session():
             print(" [⚡] Engine Utama diubah ke: GEMINI! Chat berikutnya akan stay di Gemini.")
             continue
 
+        # Direct Manual Shortcuts for Music and Apps
+        low_in = user_input.lower()
+        if low_in in ('pause', 'stop'):
+            act_msg = await execute_kira_action('PAUSE')
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in in ('play', 'resume'):
+            act_msg = await execute_kira_action('PLAY')
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in in ('next', 'skip'):
+            act_msg = await execute_kira_action('NEXT')
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in in ('prev', 'previous'):
+            act_msg = await execute_kira_action('PREV')
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in.startswith('open '):
+            app_t = user_input[5:].strip()
+            act_msg = await execute_kira_action(f"OPEN:{app_t}")
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in.startswith('play '):
+            song_t = user_input[5:].strip()
+            act_msg = await execute_kira_action(f"PLAY_SONG:{song_t}")
+            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+
         if user_input.lower().startswith('key '):
             new_key = user_input[4:].strip()
             if new_key:
@@ -1036,10 +1165,15 @@ async def run_chat_session():
         ctx = await get_live_context_info()
         sys.stdout.write(" [Kira sedang berpikir...]\r")
         sys.stdout.flush()
-        emo, ans = await asyncio.to_thread(query_kira_ai, user_input, ctx)
+        emo, ans, act = await asyncio.to_thread(query_kira_ai, user_input, ctx)
         ai_current_emotion = emo
         ai_current_text    = ans
         print(f" [Kira]: [{emo}] {ans}")
+
+        if act:
+            act_msg = await execute_kira_action(act)
+            if act_msg:
+                print(f" ⚡ [Aksi Laptop]: {act_msg}")
 
         for _ in range(3):
             send_udp_packet()
