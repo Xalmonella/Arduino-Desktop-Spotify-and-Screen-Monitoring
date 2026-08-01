@@ -18,7 +18,7 @@ const char* password = "112358mn";
 
 WiFiUDP udp;
 const unsigned int UDP_PORT = 8888;
-char packetBuf[512];
+char packetBuf[640];
 
 // 32x32 Pixel-Art Xenomorph Sprite (Front-Facing Pixel Art XBMP format)
 static const unsigned char xenomorph_bits[] PROGMEM = {
@@ -42,7 +42,7 @@ char dTime[SLEN]     = "--:--:--";
 char dSysLabel[24]   = "SYS: ONLINE";
 char dSysDetail[32]  = "MODE: OVERDRIVE";
 char dAiEmotion[16]  = "HAPPY";
-char dAiText[96]     = "Halo! Aku Kira, pacar AI kamu! ( > ‿ < )";
+char dAiText[256]    = "Halo! Aku Kira, pacar AI kamu! ( > ‿ < )";
 
 // System stats data
 char dCpu[8]         = "0";
@@ -806,9 +806,10 @@ void drawXenomorphClockScreen() {
 }
 
 // Typewriter & Smooth Scroll State
-char lastAiText[96] = "";
-int aiTypingLen     = 0;
+char lastAiText[256] = "";
+int aiTypingLen      = 0;
 unsigned long lastTypewriterMs = 0;
+unsigned long typingDoneMs     = 0;
 float smoothStartLine = 0.0f;
 
 // -----------------------------------------------------------------------------
@@ -824,30 +825,34 @@ void drawAICompanionScreen() {
     strncpy(lastAiText, dAiText, sizeof(lastAiText) - 1);
     aiTypingLen = 0;
     lastTypewriterMs = now;
+    typingDoneMs = 0;
     smoothStartLine = 0.0f;
   }
 
-  // Smooth time-based character advancement (1 character every 30ms)
+  // Smooth time-based character advancement (1 character every 25ms)
   int fullTextLen = strlen(dAiText);
   if (aiTypingLen < fullTextLen) {
-    int advance = (now - lastTypewriterMs) / 30;
+    int advance = (now - lastTypewriterMs) / 25;
     if (advance > 0) {
       aiTypingLen += advance;
-      if (aiTypingLen > fullTextLen) aiTypingLen = fullTextLen;
-      lastTypewriterMs += advance * 30;
+      if (aiTypingLen >= fullTextLen) {
+        aiTypingLen = fullTextLen;
+        typingDoneMs = now; // Mark time when typing completed
+      }
+      lastTypewriterMs += advance * 25;
     }
   }
 
   bool isTalking = (aiTypingLen < fullTextLen);
 
-  // 1. Pre-wrap full text into line segments (up to 8 lines max)
+  // 1. Pre-wrap full text into line segments (up to 16 lines max)
   int maxCharPerLine = 24;
   int lineCount = 0;
-  int lineStart[8];
-  int lineLen[8];
+  int lineStart[16];
+  int lineLen[16];
 
   int startIdx = 0;
-  while (startIdx < fullTextLen && lineCount < 8) {
+  while (startIdx < fullTextLen && lineCount < 16) {
     lineStart[lineCount] = startIdx;
     int endIdx = startIdx + maxCharPerLine;
     if (endIdx >= fullTextLen) {
@@ -887,15 +892,35 @@ void drawAICompanionScreen() {
 
   // Calculate target scroll line (Chat box displays 3 lines at a time)
   int targetStartLine = 0;
-  if (activeLine >= 2) {
-    targetStartLine = activeLine - 2;
+  if (isTalking) {
+    // While typing: follow currently active line
+    if (activeLine >= 2) {
+      targetStartLine = activeLine - 2;
+    }
+  } else {
+    // When done typing: scroll to the VERY END of the text (showing the last lines)
+    if (lineCount > 3) {
+      unsigned long elapsedSinceDone = now - typingDoneMs;
+      // First 4 seconds after typing: lock view at the end of the text
+      if (elapsedSinceDone < 4000) {
+        targetStartLine = lineCount - 3;
+      } else {
+        // Continuous cycle: toggle between end of text and top of text every 4 seconds
+        int cycle = ((elapsedSinceDone - 4000) / 4000) % 2;
+        targetStartLine = (cycle == 0) ? (lineCount - 3) : 0;
+      }
+    } else {
+      targetStartLine = 0;
+    }
   }
+
   if (targetStartLine > lineCount - 3 && lineCount >= 3) {
     targetStartLine = lineCount - 3;
   }
+  if (targetStartLine < 0) targetStartLine = 0;
 
   // Smooth scroll interpolation
-  smoothStartLine += ((float)targetStartLine - smoothStartLine) * 0.20f;
+  smoothStartLine += ((float)targetStartLine - smoothStartLine) * 0.15f;
 
   // Top Banner / Header (Y: 0..10)
   u8g2.setFont(u8g2_font_5x7_tf);

@@ -226,7 +226,7 @@ import urllib.request
 KIRA_SYSTEM_PROMPT = """
 You are Kira, a smart, friendly, witty virtual AI desk companion living on a 1.3" OLED display.
 Rules:
-1. Keep responses natural, intelligent, and VERY SHORT (max 15 to 25 words / max 65 characters).
+1. Keep responses natural, intelligent, friendly, and complete (max 30 to 45 words / max 180 characters).
 2. Write in clean, natural Indonesian (use "aku", "kamu", "siap", "woke", "hehe").
 3. Prefix response with an emotion tag in brackets: [HAPPY], [TALK], [BLUSH], [WINK], or [SURPRISED].
 """
@@ -313,7 +313,7 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
         "contents": contents,
         "systemInstruction": {"parts": [{"text": KIRA_SYSTEM_PROMPT}]},
         "generationConfig": {
-            "maxOutputTokens": 150,
+            "maxOutputTokens": 300,
             "temperature": 0.8,
             "thinkingConfig": {"thinkingBudget": 0}
         }
@@ -341,7 +341,7 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
 
                 clean_res = clean_text_for_oled(raw_text)
                 kira_chat_history.append({"user": user_prompt, "kira": f"[{emotion}] {clean_res}"})
-                return emotion, clean_res[:70]
+                return emotion, clean_res[:180]
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 rate_limited = True
