@@ -42,7 +42,7 @@ char dTime[SLEN]     = "--:--:--";
 char dSysLabel[24]   = "SYS: ONLINE";
 char dSysDetail[32]  = "MODE: OVERDRIVE";
 char dAiEmotion[16]  = "HAPPY";
-char dAiText[256]    = "Halo! Aku Kira, pacar AI kamu! ( > ‿ < )";
+char dAiText[256]    = "Halo sayang! Aku Kira, pacar AI kamu! ( > ‿ < ) ♡";
 
 // System stats data
 char dCpu[8]         = "0";
