@@ -475,27 +475,52 @@ def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
         print(f"\n [⚠️ Semua {len(exhausted_keys)} Groq key habis kuota!]")
     return "", ""
 
+active_primary_engine = "groq" if get_groq_keys() else "gemini"
+
 def query_kira_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
-    """Unified AI Router: Gemini → Groq → Offline fallback."""
-    global kira_chat_history
+    """Unified AI Router with Sticky Engine Rotation:
+    Stays on active_primary_engine until rate limited, then automatically switches to the other engine and stays there."""
+    global kira_chat_history, active_primary_engine
 
-    # 1. Gemini Cloud API with multi-key rotation
-    try:
-        emo, ans = query_gemini_ai(user_prompt, context_info)
-        if ans:
-            return emo, ans
-    except Exception:
-        pass
+    if active_primary_engine == "groq":
+        # 1. Try Groq first
+        try:
+            emo, ans = query_groq_ai(user_prompt, context_info)
+            if ans:
+                return emo, ans
+        except Exception:
+            pass
 
-    # 2. Groq Cloud API with multi-key rotation
-    try:
-        emo, ans = query_groq_ai(user_prompt, context_info)
-        if ans:
-            return emo, ans
-    except Exception:
-        pass
+        # 2. Groq failed -> Failover to Gemini and STAY on Gemini
+        try:
+            emo, ans = query_gemini_ai(user_prompt, context_info)
+            if ans:
+                active_primary_engine = "gemini"
+                print("\n [🔄 Active Engine otomatis beralih ke GEMINI]")
+                return emo, ans
+        except Exception:
+            pass
 
-    # 3. Final offline fallback
+    else:  # active_primary_engine == "gemini"
+        # 1. Try Gemini first
+        try:
+            emo, ans = query_gemini_ai(user_prompt, context_info)
+            if ans:
+                return emo, ans
+        except Exception:
+            pass
+
+        # 2. Gemini failed -> Failover to Groq and STAY on Groq
+        try:
+            emo, ans = query_groq_ai(user_prompt, context_info)
+            if ans:
+                active_primary_engine = "groq"
+                print("\n [🔄 Active Engine otomatis beralih ke GROQ]")
+                return emo, ans
+        except Exception:
+            pass
+
+    # 3. Final offline fallback if all engines failed
     emo, ans = get_offline_kira_response(user_prompt)
     kira_chat_history.append({"user": user_prompt, "kira": f"[{emo}] {ans}"})
     return emo, ans
@@ -826,6 +851,7 @@ def print_chat_header():
     print(" (Ketik 'key <API_KEY>' untuk set Gemini API Key)")
     print(" (Ketik 'addkey <API_KEY>' untuk tambah key rotasi)")
     print(" (Ketik 'groqkey <API_KEY>' untuk set Groq API Key)")
+    print(" (Ketik 'use groq' / 'use gemini' untuk ganti engine utama)")
     print(" (Ketik 'keys' untuk lihat daftar semua API key aktif)")
     print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen)")
     print("==================================================")
@@ -843,13 +869,13 @@ def print_chat_header():
         print(f" [✓] GROQ:   {len(groq_keys)} key aktif (utama: {masked})")
     else:
         print(" [✗] GROQ:   Belum ada key. Ketik 'groqkey <API_KEY>'")
-    total = len(gemini_keys) + len(groq_keys)
-    if total > 0:
-        print(f" [🔄] Flow: Gemini ({len(gemini_keys)} key) → Groq ({len(groq_keys)} key) → Offline")
+    
+    print(f" [⚡] ENGINE UTAMA AKTIF: {active_primary_engine.upper()}")
+    print(f" [🔄] Sticky Failover: Selalu stay di {active_primary_engine.upper()} sampai rate-limited, lalu switch otomatis!")
     print("--------------------------------------------------")
 
 async def run_chat_session():
-    global in_chat_session, screen_mode, ai_current_emotion, ai_current_text, kira_chat_history, cached_title, cached_artist
+    global in_chat_session, screen_mode, ai_current_emotion, ai_current_text, kira_chat_history, cached_title, cached_artist, active_primary_engine
 
     in_chat_session = True
     screen_mode = 4
@@ -903,6 +929,16 @@ async def run_chat_session():
             print("--------------------------------------------------")
             continue
 
+        if user_input.lower() in ('use groq', 'groq', 'mode groq'):
+            active_primary_engine = "groq"
+            print(" [⚡] Engine Utama diubah ke: GROQ! Chat berikutnya akan stay di Groq.")
+            continue
+
+        if user_input.lower() in ('use gemini', 'gemini', 'mode gemini'):
+            active_primary_engine = "gemini"
+            print(" [⚡] Engine Utama diubah ke: GEMINI! Chat berikutnya akan stay di Gemini.")
+            continue
+
         if user_input.lower().startswith('key '):
             new_key = user_input[4:].strip()
             if new_key:
@@ -950,7 +986,8 @@ async def run_chat_session():
                     print(f"     [{i}] {masked}{status}")
             else:
                 print("  GROQ:   (kosong) - Ketik 'groqkey <API_KEY>'")
-            print(f"  Flow: Gemini -> Groq -> Offline")
+            print(f"  Engine Utama Saat Ini: {active_primary_engine.upper()}")
+            print(f"  Flow Sticky: Stay di {active_primary_engine.upper()} -> Failover ke lainnya jika rate-limited -> Offline")
             continue
 
         ctx = f"Lagu saat ini: {cached_title} oleh {cached_artist}" if cached_title != "No Track" else ""
