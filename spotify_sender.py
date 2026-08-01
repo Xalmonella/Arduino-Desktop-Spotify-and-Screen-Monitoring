@@ -58,11 +58,12 @@ start_chat_immediately = "--chat" in sys.argv or "-c" in sys.argv
 def clean_text_for_oled(text: str) -> str:
     """
     UNIVERSAL MULTI-LANGUAGE TRANSLITERATOR & SANITIZER
-    Converts Unicode text from ANY language in the world (Japanese, Korean, Chinese, 
-    Cyrillic, Arabic, Thai, Greek, European Accents) into clean, readable ASCII text.
+    Converts Unicode text from ANY language in the world into clean ASCII text.
     """
     if not text:
         return ""
+
+    text = text.replace("♡", "<3").replace("❤️", "<3").replace("💕", "<3").replace("♥", "<3")
     if text.isascii():
         return text.strip()
 
@@ -283,7 +284,7 @@ async def play_spotify_direct(query: str) -> str:
         return f"🎵 Membuka pencarian lagu '{query}' di Spotify Web"
 
 def parse_kira_action(raw_text: str) -> tuple[str, str]:
-    """Extracts [ACTION:...] tag from Kira's response text and returns (clean_text, action_str)."""
+    """Extracts [ACTION:...] tag from Kira's response text and cleans trailing transliterated 'H' to '♡'."""
     action_str = ""
     if "[ACTION:" in raw_text:
         start_idx = raw_text.find("[ACTION:")
@@ -292,6 +293,15 @@ def parse_kira_action(raw_text: str) -> tuple[str, str]:
             action_tag = raw_text[start_idx:end_idx+1]
             action_str = action_tag[8:-1].strip()
             raw_text = raw_text.replace(action_tag, "").strip()
+
+    # Replace trailing isolated 'H' or 'H!' caused by Unicode transliteration of '♡'
+    if raw_text.endswith(" H"):
+        raw_text = raw_text[:-2] + " ♡"
+    elif raw_text.endswith(" H!"):
+        raw_text = raw_text[:-3] + " ♡!"
+    elif raw_text.endswith(" H."):
+        raw_text = raw_text[:-3] + " ♡."
+
     return raw_text, action_str
 
 async def execute_kira_action(action_str: str) -> str:
