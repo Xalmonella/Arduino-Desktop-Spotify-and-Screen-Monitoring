@@ -1032,8 +1032,16 @@ def print_chat_header():
     print("================================================================================")
     sys.stdout.flush()
 
+DAYS_ID = {
+    0: "Senin", 1: "Selasa", 2: "Rabu", 3: "Kamis", 4: "Jumat", 5: "Sabtu", 6: "Minggu"
+}
+MONTHS_ID = {
+    1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
+    7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember"
+}
+
 async def get_live_context_info() -> str:
-    """Fetches real-time song title, artist, playback status, active game/app presence, and time directly from Windows."""
+    """Fetches real-time song title, artist, playback status, active game/app presence, day, date, and time directly from Windows."""
     global cached_title, cached_artist, is_playing
     
     song_info = ""
@@ -1055,25 +1063,20 @@ async def get_live_context_info() -> str:
                     is_playing = (pb.playback_status == PbStatus.PLAYING)
             except Exception:
                 pass
-            
-            if cached_title and cached_title != "No Track":
-                status_str = "sedang diputar" if is_playing else "sedang dipause"
-                song_info = f"Lagu saat ini ({status_str}): '{cached_title}' oleh '{cached_artist}'"
     except Exception:
         pass
-
-    if not song_info:
-        if cached_title and cached_title != "No Track":
-            song_info = f"Lagu saat ini: '{cached_title}' oleh '{cached_artist}'"
-        else:
-            song_info = "Tidak ada lagu yang sedang diputar"
 
     # Fetch active game / window presence
     pres_label, pres_detail = get_presence_status(is_playing, cached_title)
     presence_info = f"Aktivitas PC: {pres_label} {pres_detail}" if pres_detail else ""
 
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-    ctx_parts = [f"Jam: {now_str}"]
+    now_dt = datetime.datetime.now()
+    day_name = DAYS_ID.get(now_dt.weekday(), "")
+    month_name = MONTHS_ID.get(now_dt.month, "")
+    full_date_str = f"Hari {day_name}, {now_dt.day} {month_name} {now_dt.year}"
+    time_str = now_dt.strftime("%H:%M:%S")
+
+    ctx_parts = [f"Waktu Laptop: {full_date_str} jam {time_str}"]
     if presence_info:
         ctx_parts.append(presence_info)
     if cached_title and cached_title != "No Track":
