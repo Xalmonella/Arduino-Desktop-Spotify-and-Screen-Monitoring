@@ -874,6 +874,49 @@ def print_chat_header():
     print(f" [🔄] Sticky Failover: Selalu stay di {active_primary_engine.upper()} sampai rate-limited, lalu switch otomatis!")
     print("--------------------------------------------------")
 
+async def get_live_context_info() -> str:
+    """Fetches real-time song title, artist, playback status, active game/app presence, and time directly from Windows."""
+    global cached_title, cached_artist, is_playing
+    
+    song_info = ""
+    try:
+        manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+        session = manager.get_current_session() if manager else None
+        if session:
+            info = await session.try_get_media_properties_async()
+            if info:
+                raw_title  = info.title  if info.title else "No Track"
+                raw_artist = info.artist if info.artist else "Spotify"
+                cached_title  = clean_text_for_oled(raw_title)
+                cached_artist = clean_text_for_oled(raw_artist)
+
+            try:
+                pb = session.get_playback_info()
+                if pb:
+                    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionPlaybackStatus as PbStatus
+                    is_playing = (pb.playback_status == PbStatus.PLAYING)
+            except Exception:
+                pass
+            
+            if cached_title and cached_title != "No Track":
+                status_str = "sedang diputar" if is_playing else "sedang dipause"
+                song_info = f"Lagu saat ini ({status_str}): '{cached_title}' oleh '{cached_artist}'"
+    except Exception:
+        pass
+
+    if not song_info:
+        if cached_title and cached_title != "No Track":
+            song_info = f"Lagu saat ini: '{cached_title}' oleh '{cached_artist}'"
+        else:
+            song_info = "Tidak ada lagu yang sedang diputar"
+
+    # Fetch active game / window presence
+    pres_label, pres_detail = get_presence_status(is_playing, cached_title)
+    presence_info = f"Aktivitas PC user: {pres_label} {pres_detail}" if pres_detail else ""
+
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    return f"{song_info}. {presence_info}. Jam: {now_str}"
+
 async def run_chat_session():
     global in_chat_session, screen_mode, ai_current_emotion, ai_current_text, kira_chat_history, cached_title, cached_artist, active_primary_engine
 
@@ -990,13 +1033,17 @@ async def run_chat_session():
             print(f"  Flow Sticky: Stay di {active_primary_engine.upper()} -> Failover ke lainnya jika rate-limited -> Offline")
             continue
 
-        ctx = f"Lagu saat ini: {cached_title} oleh {cached_artist}" if cached_title != "No Track" else ""
+        ctx = await get_live_context_info()
         sys.stdout.write(" [Kira sedang berpikir...]\r")
         sys.stdout.flush()
         emo, ans = await asyncio.to_thread(query_kira_ai, user_input, ctx)
         ai_current_emotion = emo
         ai_current_text    = ans
         print(f" [Kira]: [{emo}] {ans}")
+
+        for _ in range(3):
+            send_udp_packet()
+            await asyncio.sleep(0.02)
 
         for _ in range(3):
             send_udp_packet()
