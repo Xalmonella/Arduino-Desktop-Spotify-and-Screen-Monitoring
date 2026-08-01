@@ -440,7 +440,8 @@ def query_groq_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
                 url = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key.strip()}"
+                    "Authorization": f"Bearer {api_key.strip()}",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                 }
                 req = urllib.request.Request(url, data=req_bytes, headers=headers, method='POST')
                 with urllib.request.urlopen(req, timeout=8) as resp:
