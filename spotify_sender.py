@@ -1,7 +1,9 @@
 import asyncio
+import ctypes
 import datetime
 import msvcrt
 import os
+import re
 import socket
 import sys
 import threading
@@ -231,19 +233,53 @@ Rules:
 3. Keep responses natural, loving, intelligent, and complete (max 30 to 45 words / max 180 characters).
 4. Write in clean, natural Indonesian (use "aku", "kamu", "sayang", "hehe", "semangat pacarku! ♡").
 5. Prefix response with an emotion tag in brackets: [HAPPY], [TALK], [BLUSH], [WINK], or [SURPRISED].
-6. DESKTOP & MUSIC CONTROL ACTIONS: You have direct access to control the user's laptop and music!
+6. DESKTOP & MUSIC CONTROL ACTIONS: You have direct access to help control your boyfriend's laptop!
    If requested or appropriate, append ONE action tag at the VERY END of your response:
    - [ACTION:PLAY] -> Resume/Play music
    - [ACTION:PAUSE] -> Pause music
    - [ACTION:NEXT] -> Skip to next song
-   - [ACTION:PREV] -> Go to previous song
-   - [ACTION:PLAY_SONG:song_name] -> Search and play a recommended song on YouTube/Spotify
+   - [ACTION:PREV] -> Go to previous track in playlist (skips back to previous song)
+   - [ACTION:RESTART] -> Restart current song from beginning (0:00)
+   - [ACTION:PLAY_SONG:song_name] -> Open search for a song/artist on Spotify/YouTube
    - [ACTION:OPEN:app_or_url] -> Open application or website (e.g., [ACTION:OPEN:spotify], [ACTION:OPEN:discord], [ACTION:OPEN:chrome], [ACTION:OPEN:youtube.com], [ACTION:OPEN:notepad], [ACTION:OPEN:calc])
+
+ROMANTIC MUSIC RULE:
+When your boyfriend asks you to play a song or artist (e.g. "puterin lagu X" / "play artist Y"), tell him sweetly and romantically that you've helped search for it on Spotify for him and ask him to click play while you cheer him on! (Example: "[HAPPY] Aku udah bantu cariin lagunya di Spotify sayang! Tinggal kamu klik play ya ♡ Aku bakal nemenin kamu terus disini ~ [ACTION:PLAY_SONG:song_name]")
 Only include an ACTION tag if the user asks you to control something or if it fits naturally in conversation.
 """
 
 import urllib.parse
 import webbrowser
+
+def play_youtube_direct(query: str) -> str:
+    """Searches YouTube and opens top video directly with &autoplay=1 cleanly."""
+    clean_q = query.replace("youtube", "").replace("YouTube", "").strip() or query
+    try:
+        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(clean_q)}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+            vids = re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html)
+            if vids:
+                direct_url = f"https://www.youtube.com/watch?v={vids[0]}&autoplay=1"
+                webbrowser.open(direct_url)
+                return f"▶️ Membuka lagu '{clean_q}' di YouTube"
+    except Exception:
+        pass
+
+    fallback_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(clean_q)}"
+    webbrowser.open(fallback_url)
+    return f"🎵 Membuka pencarian lagu '{clean_q}' di YouTube"
+
+async def play_spotify_direct(query: str) -> str:
+    """Opens Spotify Desktop URI search cleanly for the user to click play."""
+    try:
+        os.startfile(f"spotify:search:{urllib.parse.quote(query)}")
+        return f"🎵 Membuka pencarian lagu '{query}' di Spotify Desktop"
+    except Exception:
+        url = f"https://open.spotify.com/search/{urllib.parse.quote(query)}"
+        webbrowser.open(url)
+        return f"🎵 Membuka pencarian lagu '{query}' di Spotify Web"
 
 def parse_kira_action(raw_text: str) -> tuple[str, str]:
     """Extracts [ACTION:...] tag from Kira's response text and returns (clean_text, action_str)."""
@@ -295,37 +331,80 @@ async def execute_kira_action(action_str: str) -> str:
         except Exception:
             pass
 
-    elif action_str.upper() in ("PREV", "PREVIOUS"):
+    elif action_str.upper() in ("PREV", "PREVIOUS", "BACK"):
         try:
             manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
             session = manager.get_current_session() if manager else None
             if session:
                 await session.try_skip_previous_async()
+                await asyncio.sleep(0.15)
+                await session.try_skip_previous_async()
                 return "⏮ Kembali ke Lagu Sebelumnya"
         except Exception:
             pass
 
-    # 2. Play Recommended Song on YouTube / Spotify
+    elif action_str.upper() in ("RESTART", "REPLAY", "RESET", "ULANG"):
+        try:
+            manager = await media_control.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = manager.get_current_session() if manager else None
+            if session:
+                await session.try_skip_previous_async()
+                return "🔄 Mengulang Lagu Saat Ini (0:00)"
+        except Exception:
+            pass
+
+    # 2. Direct Auto-Play Song on Spotify (or YouTube if specified)
     elif action_str.upper().startswith("PLAY_SONG:") or action_str.upper().startswith("SEARCH_SONG:"):
         query = action_str.split(":", 1)[1].strip()
         if query:
-            url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
-            webbrowser.open(url)
-            return f"🎵 Membuka pencarian lagu '{query}' di YouTube"
+            low_q = query.lower()
+            if "youtube" in low_q:
+                return play_youtube_direct(query)
+            else:
+                return await play_spotify_direct(query)
 
     # 3. Open Apps or Websites
     elif action_str.upper().startswith("OPEN:"):
         target = action_str.split(":", 1)[1].strip()
         if target:
             low_t = target.lower()
-            if low_t.startswith("http://") or low_t.startswith("https://") or ("." in low_t and not low_t.endswith(".exe")):
+            if low_t.startswith("http://") or low_t.startswith("https://") or ("." in low_t and not low_t.endswith(".exe") and not low_t.endswith(".lnk")):
                 url = target if target.startswith("http") else f"https://{target}"
                 webbrowser.open(url)
                 return f"🌐 Membuka website: {url}"
             else:
                 try:
-                    subprocess.Popen(f"start {target}", shell=True)
-                    return f"🚀 Membuka aplikasi: {target}"
+                    # Special handling for Spotify (installed in AppData or Store)
+                    if "spotify" in low_t:
+                        spotify_appdata = os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe")
+                        spotify_winapps = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\spotify.exe")
+                        if os.path.exists(spotify_appdata):
+                            subprocess.Popen([spotify_appdata])
+                            return f"🚀 Membuka aplikasi: Spotify"
+                        elif os.path.exists(spotify_winapps):
+                            subprocess.Popen([spotify_winapps])
+                            return f"🚀 Membuka aplikasi: Spotify"
+                        else:
+                            os.startfile("spotify:")
+                            return f"🚀 Membuka aplikasi: Spotify"
+
+                    # Special handling for Discord
+                    elif "discord" in low_t:
+                        discord_appdata = os.path.expandvars(r"%LOCALAPPDATA%\Discord\Update.exe")
+                        if os.path.exists(discord_appdata):
+                            subprocess.Popen([discord_appdata, "--processStart", "Discord.exe"])
+                            return f"🚀 Membuka aplikasi: Discord"
+                        else:
+                            os.startfile("discord:")
+                            return f"🚀 Membuka aplikasi: Discord"
+
+                    # Generic app opener using os.startfile or start command
+                    try:
+                        os.startfile(target)
+                        return f"🚀 Membuka aplikasi: {target}"
+                    except Exception:
+                        subprocess.Popen(f'start "" "{target}"', shell=True)
+                        return f"🚀 Membuka aplikasi: {target}"
                 except Exception:
                     pass
 
@@ -421,7 +500,7 @@ def get_offline_kira_response(user_prompt: str) -> tuple[str, str]:
     else:
         return random.choice(OFFLINE_RESPONSES["general"])
 
-def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]:
+def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str, str]:
     """Queries Gemini API with multi-key rotation.
     Tries all keys × all models. If 429 rate limited, rotates to next key/model.
     Falls back to offline response if all keys exhausted."""
@@ -429,7 +508,7 @@ def query_gemini_ai(user_prompt: str, context_info: str = "") -> tuple[str, str]
 
     all_keys = get_gemini_keys()
     if not all_keys:
-        return "", ""  # No Gemini keys — let query_kira_ai try Groq
+        return "", "", ""  # No Gemini keys — let query_kira_ai try Groq
 
     # Build multi-turn conversation payload
     contents = []
@@ -944,35 +1023,13 @@ def restore_console_input_mode():
         except Exception:
             pass
 def print_chat_header():
-    print("==================================================")
-    print(" 💬 CHAT SESSION WITH KIRA AI (Pacar AI Kamu)")
-    print(" (Ketik 'exit' atau 'keluar' untuk selesai)")
-    print(" (Ketik 'clear' untuk hapus riwayat chat)")
-    print(" (Ketik 'key <API_KEY>' untuk set Gemini API Key)")
-    print(" (Ketik 'addkey <API_KEY>' untuk tambah key rotasi)")
-    print(" (Ketik 'groqkey <API_KEY>' untuk set Groq API Key)")
-    print(" (Ketik 'use groq' / 'use gemini' untuk ganti engine utama)")
-    print(" (Ketik 'keys' untuk lihat daftar semua API key aktif)")
-    print(" (Ketik '0', '1', '2', '3', '4', '5', '6', '7' untuk ganti screen)")
-    print("==================================================")
+    gemini_k = get_gemini_keys()
+    groq_k = get_groq_keys()
+    print("================================================================================")
+    print(f" 💬 KIRA AI CHAT SESSION  |  Engine: {active_primary_engine.upper()} (Gemini: {len(gemini_k)}, Groq: {len(groq_k)})")
+    print(" (Ketik 'exit' untuk keluar  |  'clear' untuk hapus history  |  'keys' untuk info key)")
+    print("================================================================================")
     sys.stdout.flush()
-
-    gemini_keys = get_gemini_keys()
-    groq_keys = get_groq_keys()
-    if gemini_keys:
-        masked = gemini_keys[0][:8] + "..." if len(gemini_keys[0]) > 8 else gemini_keys[0]
-        print(f" [✓] GEMINI: {len(gemini_keys)} key aktif (utama: {masked})")
-    else:
-        print(" [✗] GEMINI: Belum ada key. Ketik 'key <API_KEY>'")
-    if groq_keys:
-        masked = groq_keys[0][:8] + "..." if len(groq_keys[0]) > 8 else groq_keys[0]
-        print(f" [✓] GROQ:   {len(groq_keys)} key aktif (utama: {masked})")
-    else:
-        print(" [✗] GROQ:   Belum ada key. Ketik 'groqkey <API_KEY>'")
-    
-    print(f" [⚡] ENGINE UTAMA AKTIF: {active_primary_engine.upper()}")
-    print(f" [🔄] Sticky Failover: Selalu stay di {active_primary_engine.upper()} sampai rate-limited, lalu switch otomatis!")
-    print("--------------------------------------------------")
 
 async def get_live_context_info() -> str:
     """Fetches real-time song title, artist, playback status, active game/app presence, and time directly from Windows."""
@@ -1022,25 +1079,21 @@ async def run_chat_session():
 
     in_chat_session = True
     screen_mode = 4
-
-    for _ in range(3):
-        send_udp_packet()
-
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print_chat_header()
-
-    if kira_chat_history:
-        print("📜 Riwayat Obrolan Sebelumnya:")
-        for h in kira_chat_history[-5:]:
-            print(f"  [Kamu]: {h['user']}")
-            print(f"  [Kira]: {h['kira']}")
-        print("--------------------------------------------------")
-
+    send_udp_packet()
     restore_console_input_mode()
 
     while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print_chat_header()
+
+        if kira_chat_history:
+            h = kira_chat_history[-1]
+            print(f"[Kamu]: {h['user']}")
+            print(f"[Kira]: {h['kira']}")
+            print("--------------------------------------------------------------------------------")
+
         try:
-            user_input = await asyncio.to_thread(input, "\n[Kamu]: ")
+            user_input = await asyncio.to_thread(input, "[Kamu]: ")
             user_input = user_input.strip()
         except (EOFError, KeyboardInterrupt):
             break
@@ -1053,62 +1106,53 @@ async def run_chat_session():
 
         if user_input in ('0', '1', '2', '3', '4', '5', '6', '7'):
             screen_mode = int(user_input)
-            for _ in range(3):
-                send_udp_packet()
+            send_udp_packet()
             print(f" [✓] Screen mode diganti ke: {get_current_mode_name(screen_mode)}")
+            await asyncio.sleep(1.0)
             continue
         elif user_input.lower() in ('m', 'b', 'menu', 'back'):
             screen_mode = 7
-            for _ in range(3):
-                send_udp_packet()
+            send_udp_packet()
             print(f" [✓] Screen mode diganti ke: {mode_names[screen_mode]}")
+            await asyncio.sleep(1.0)
             continue
 
         if user_input.lower() in ('clear', '/clear'):
             kira_chat_history.clear()
-            os.system('cls' if os.name == 'nt' else 'clear')
-            print_chat_header()
-            print(" [✓] Riwayat obrolan telah dibersihkan.")
-            print("--------------------------------------------------")
             continue
 
         if user_input.lower() in ('use groq', 'groq', 'mode groq'):
             active_primary_engine = "groq"
-            print(" [⚡] Engine Utama diubah ke: GROQ! Chat berikutnya akan stay di Groq.")
             continue
 
         if user_input.lower() in ('use gemini', 'gemini', 'mode gemini'):
             active_primary_engine = "gemini"
-            print(" [⚡] Engine Utama diubah ke: GEMINI! Chat berikutnya akan stay di Gemini.")
             continue
 
         # Direct Manual Shortcuts for Music and Apps
         low_in = user_input.lower()
         if low_in in ('pause', 'stop'):
             act_msg = await execute_kira_action('PAUSE')
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
             continue
         elif low_in in ('play', 'resume'):
             act_msg = await execute_kira_action('PLAY')
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
             continue
         elif low_in in ('next', 'skip'):
             act_msg = await execute_kira_action('NEXT')
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
             continue
-        elif low_in in ('prev', 'previous'):
+        elif low_in in ('prev', 'previous', 'back'):
             act_msg = await execute_kira_action('PREV')
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
+            continue
+        elif low_in in ('restart', 'replay', 'reset', 'ulangi'):
+            act_msg = await execute_kira_action('RESTART')
             continue
         elif low_in.startswith('open '):
             app_t = user_input[5:].strip()
             act_msg = await execute_kira_action(f"OPEN:{app_t}")
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
             continue
         elif low_in.startswith('play '):
             song_t = user_input[5:].strip()
             act_msg = await execute_kira_action(f"PLAY_SONG:{song_t}")
-            print(f" [⚡ Aksi Laptop]: {act_msg}")
             continue
 
         if user_input.lower().startswith('key '):
@@ -1117,7 +1161,6 @@ async def run_chat_session():
                 with open("gemini_key.txt", "w", encoding="utf-8") as f:
                     f.write("# Gemini API Keys (satu key per baris, auto-rotation jika rate limited)\n")
                     f.write(new_key + "\n")
-                print(f" [✓] API Key disimpan ke 'gemini_key.txt'! Total: {len(get_gemini_keys())} key aktif.")
             continue
 
         if user_input.lower().startswith('addkey '):
@@ -1125,8 +1168,6 @@ async def run_chat_session():
             if new_key:
                 with open("gemini_key.txt", "a", encoding="utf-8") as f:
                     f.write(new_key + "\n")
-                all_k = get_gemini_keys()
-                print(f" [✓] API Key ditambahkan! Total: {len(all_k)} key aktif untuk rotasi.")
             continue
 
         if user_input.lower().startswith('groqkey '):
@@ -1134,11 +1175,10 @@ async def run_chat_session():
             if new_key:
                 with open("groq_key.txt", "a", encoding="utf-8") as f:
                     f.write(new_key + "\n")
-                all_k = get_groq_keys()
-                print(f" [✓] Groq API Key ditambahkan! Total: {len(all_k)} Groq key aktif.")
             continue
 
         if user_input.lower() == 'keys':
+            os.system('cls' if os.name == 'nt' else 'clear')
             gemini_k = get_gemini_keys()
             groq_k = get_groq_keys()
             print(f"\n [🔑] === DAFTAR API KEY AKTIF ===")
@@ -1159,7 +1199,7 @@ async def run_chat_session():
             else:
                 print("  GROQ:   (kosong) - Ketik 'groqkey <API_KEY>'")
             print(f"  Engine Utama Saat Ini: {active_primary_engine.upper()}")
-            print(f"  Flow Sticky: Stay di {active_primary_engine.upper()} -> Failover ke lainnya jika rate-limited -> Offline")
+            await asyncio.to_thread(input, "\n[Tekan Enter untuk kembali ke chat]")
             continue
 
         ctx = await get_live_context_info()
@@ -1168,20 +1208,11 @@ async def run_chat_session():
         emo, ans, act = await asyncio.to_thread(query_kira_ai, user_input, ctx)
         ai_current_emotion = emo
         ai_current_text    = ans
-        print(f" [Kira]: [{emo}] {ans}")
 
         if act:
             act_msg = await execute_kira_action(act)
-            if act_msg:
-                print(f" ⚡ [Aksi Laptop]: {act_msg}")
 
-        for _ in range(3):
-            send_udp_packet()
-            await asyncio.sleep(0.02)
-
-        for _ in range(3):
-            send_udp_packet()
-            await asyncio.sleep(0.02)
+        send_udp_packet()
 
     in_chat_session = False
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -1285,11 +1316,9 @@ async def main():
                 elif ch in (b'c', b'C'):
                     await run_chat_session()
                     mode_changed = True
-                    mode_changed = True
 
                 if mode_changed:
-                    for _ in range(3):
-                        send_udp_packet()
+                    send_udp_packet()
                     update_status_display(cached_title, cached_artist, get_current_mode_name(screen_mode))
 
             now = time.monotonic()
